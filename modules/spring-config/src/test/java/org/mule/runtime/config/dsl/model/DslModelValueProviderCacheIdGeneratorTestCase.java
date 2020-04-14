@@ -34,6 +34,7 @@ import static org.mule.runtime.app.declaration.api.fluent.ElementDeclarer.newPar
 import static org.mule.runtime.core.api.extension.MuleExtensionModelProvider.MULE_NAME;
 import static org.mule.runtime.internal.dsl.DslConstants.FLOW_ELEMENT_IDENTIFIER;
 import static org.slf4j.LoggerFactory.getLogger;
+
 import org.mule.metadata.api.ClassTypeLoader;
 import org.mule.runtime.api.component.location.Location;
 import org.mule.runtime.api.dsl.DslResolvingContext;
@@ -61,7 +62,6 @@ import org.mule.runtime.config.api.dsl.model.DslElementModelFactory;
 import org.mule.runtime.config.api.dsl.model.metadata.DslElementBasedValueProviderCacheIdGenerator;
 import org.mule.runtime.config.api.dsl.processor.ArtifactConfig;
 import org.mule.runtime.config.internal.model.ApplicationModel;
-import org.mule.runtime.config.internal.model.ComponentModel;
 import org.mule.runtime.core.api.extension.MuleExtensionModelProvider;
 import org.mule.runtime.core.internal.locator.ComponentLocator;
 import org.mule.runtime.core.internal.value.cache.ValueProviderCacheId;
@@ -69,8 +69,6 @@ import org.mule.runtime.core.internal.value.cache.ValueProviderCacheIdGenerator;
 import org.mule.runtime.extension.api.declaration.type.ExtensionsTypeLoaderFactory;
 import org.mule.runtime.extension.api.property.RequiredForMetadataModelProperty;
 import org.mule.tck.junit4.AbstractMuleTestCase;
-
-import com.google.common.collect.ImmutableSet;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -86,6 +84,8 @@ import org.junit.Before;
 import org.junit.Test;
 import org.mockito.Mock;
 import org.slf4j.Logger;
+
+import com.google.common.collect.ImmutableSet;
 
 public class DslModelValueProviderCacheIdGeneratorTestCase extends AbstractMuleTestCase {
 
@@ -113,7 +113,7 @@ public class DslModelValueProviderCacheIdGeneratorTestCase extends AbstractMuleT
 
   private static final String MY_FLOW = "myFlow";
   private static final String MY_CONFIG = "myConfig";
-  private static final String MY_CONNECTION = MY_CONFIG + "/connection"; //Not a valid location, hack to reuse helper function.
+  private static final String MY_CONNECTION = MY_CONFIG + "/connection"; // Not a valid location, hack to reuse helper function.
   private static final String SOURCE_LOCATION = MY_FLOW + "/source";
   private static final String OPERATION_LOCATION = MY_FLOW + "/processors/0";
 
@@ -433,12 +433,11 @@ public class DslModelValueProviderCacheIdGeneratorTestCase extends AbstractMuleT
 
   private ComponentAst getComponentAst(ApplicationModel app, String location) {
     Reference<ComponentAst> componentAst = new Reference<>();
-    app.getRootComponentModel().executedOnEveryInnerComponent(
-                                                              c -> {
-                                                                if (c.getComponentLocation().getLocation().equals(location)) {
-                                                                  componentAst.set((ComponentAst) c);
-                                                                }
-                                                              });
+    app.recursiveStream().forEach(c -> {
+      if (c.getLocation().getLocation().equals(location)) {
+        componentAst.set(c);
+      }
+    });
     return componentAst.get();
   }
 
@@ -514,7 +513,7 @@ public class DslModelValueProviderCacheIdGeneratorTestCase extends AbstractMuleT
                  .findAny()
                  .map(fp -> {
                    parameterConsumer.accept(fp);
-                   return EMPTY; //Needed to avoid exception
+                   return EMPTY; // Needed to avoid exception
                  })
                  .orElseThrow(() -> new RuntimeException("Could not find parameter to modify")))
         .orElseThrow(() -> new RuntimeException("Location not found"));
@@ -795,24 +794,24 @@ public class DslModelValueProviderCacheIdGeneratorTestCase extends AbstractMuleT
 
   private static class Locator implements ComponentLocator<ComponentAst> {
 
-    private final Map<Location, ComponentModel> components = new HashMap<>();
+    private final Map<Location, ComponentAst> components = new HashMap<>();
 
     Locator(ApplicationModel app) {
-      app.getRootComponentModel().getInnerComponents().forEach(this::addComponent);
+      app.topLevelComponentsStream().forEach(this::addComponent);
     }
 
     @Override
     public Optional<ComponentAst> get(Location location) {
-      return Optional.ofNullable(components.get(location)).map(cm -> (ComponentAst) cm);
+      return Optional.ofNullable(components.get(location)).map(cm -> cm);
     }
 
-    private Location getLocation(ComponentModel component) {
-      return Location.builderFromStringRepresentation(component.getComponentLocation().getLocation()).build();
+    private Location getLocation(ComponentAst component) {
+      return Location.builderFromStringRepresentation(component.getLocation().getLocation()).build();
     }
 
-    private void addComponent(ComponentModel component) {
+    private void addComponent(ComponentAst component) {
       components.put(getLocation(component), component);
-      component.getInnerComponents().forEach(this::addComponent);
+      component.directChildrenStream().forEach(this::addComponent);
     }
   }
 

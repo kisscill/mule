@@ -18,7 +18,6 @@ import static java.util.Optional.of;
 import static java.util.Optional.ofNullable;
 import static java.util.stream.Collectors.toList;
 import static org.apache.commons.collections.CollectionUtils.disjunction;
-import static org.apache.commons.lang3.StringUtils.isBlank;
 import static org.mule.runtime.api.component.AbstractComponent.LOCATION_KEY;
 import static org.mule.runtime.api.component.Component.ANNOTATIONS_PROPERTY_NAME;
 import static org.mule.runtime.api.component.ComponentIdentifier.builder;
@@ -29,9 +28,6 @@ import static org.mule.runtime.config.api.dsl.CoreDslConstants.ERROR_HANDLER;
 import static org.mule.runtime.config.api.dsl.CoreDslConstants.ERROR_HANDLER_IDENTIFIER;
 import static org.mule.runtime.config.api.dsl.CoreDslConstants.FLOW_IDENTIFIER;
 import static org.mule.runtime.config.api.dsl.CoreDslConstants.FLOW_REF_IDENTIFIER;
-import static org.mule.runtime.config.api.dsl.CoreDslConstants.MULE_DOMAIN_IDENTIFIER;
-import static org.mule.runtime.config.api.dsl.CoreDslConstants.MULE_EE_DOMAIN_IDENTIFIER;
-import static org.mule.runtime.config.api.dsl.CoreDslConstants.MULE_IDENTIFIER;
 import static org.mule.runtime.config.api.dsl.CoreDslConstants.MULE_ROOT_ELEMENT;
 import static org.mule.runtime.config.internal.dsl.spring.BeanDefinitionFactory.SOURCE_TYPE;
 import static org.mule.runtime.config.internal.model.MetadataTypeModelAdapter.createMetadataTypeModelAdapterWithSterotype;
@@ -114,14 +110,14 @@ import java.util.Set;
 import java.util.Spliterator;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiConsumer;
-import java.util.function.Consumer;
 import java.util.stream.Stream;
 
 import javax.xml.namespace.QName;
 
+import org.slf4j.Logger;
+
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
-import org.slf4j.Logger;
 
 /**
  * An {@code ApplicationModel} holds a representation of all the artifact configuration using an abstract model to represent any
@@ -283,7 +279,7 @@ public class ApplicationModel implements ArtifactAst {
    * <p/>
    * A set of validations are applied that may make creation fail.
    *
-   * @param artifactConfig      the mule artifact configuration content.
+   * @param artifactConfig the mule artifact configuration content.
    * @param artifactDeclaration an {@link ArtifactDeclaration}
    * @throws Exception when the application configuration has semantic errors.
    */
@@ -299,14 +295,14 @@ public class ApplicationModel implements ArtifactAst {
    * <p/>
    * A set of validations are applied that may make creation fail.
    *
-   * @param artifactConfig                      the mule artifact configuration content.
-   * @param artifactDeclaration                 an {@link ArtifactDeclaration}
-   * @param extensionModels                     Set of {@link ExtensionModel extensionModels} that will be used to type componentModels
-   * @param parentConfigurationProperties       the {@link ConfigurationProperties} of the parent artifact. For instance, application
-   *                                            will receive the domain resolver.
+   * @param artifactConfig the mule artifact configuration content.
+   * @param artifactDeclaration an {@link ArtifactDeclaration}
+   * @param extensionModels Set of {@link ExtensionModel extensionModels} that will be used to type componentModels
+   * @param parentConfigurationProperties the {@link ConfigurationProperties} of the parent artifact. For instance, application
+   *        will receive the domain resolver.
    * @param componentBuildingDefinitionRegistry an optional {@link ComponentBuildingDefinitionRegistry} used to correlate items in
-   *                                            this model to their definitions expanded) false implies the mule is being created from a tooling perspective.
-   * @param externalResourceProvider            the provider for configuration properties files and ${file::name.txt} placeholders
+   *        this model to their definitions expanded) false implies the mule is being created from a tooling perspective.
+   * @param externalResourceProvider the provider for configuration properties files and ${file::name.txt} placeholders
    * @throws Exception when the application configuration has semantic errors.
    */
   // TODO: MULE-9638 remove this optional
@@ -358,25 +354,26 @@ public class ApplicationModel implements ArtifactAst {
       resolveComponentTypes();
       muleComponentModels
           .forEach(componentModel -> componentModel.resolveTypedComponentIdentifier(extensionModelHelper, runtimeMode));
-    });
-    // Have to index again the component models with macro expanded ones
-    indexComponentModels();
 
-    final ComponentLocationVisitor clv = new ComponentLocationVisitor();
-    recursiveStreamWithHierarchy().forEach(clv);
+      // Have to index again the component models with macro expanded ones
+      indexComponentModels();
+
+      final ComponentLocationVisitor clv = new ComponentLocationVisitor();
+      recursiveStreamWithHierarchy().forEach(clv);
+    });
   }
 
   private void indexComponentModels() {
-    executeOnEveryComponentTree(componentModel -> {
-      if (componentModel.getNameAttribute() != null) {
-        namedComponentModels.put(componentModel.getNameAttribute(), componentModel);
-      }
+    recursiveStream().forEach(componentModel -> {
+      componentModel.getComponentId().ifPresent(name -> {
+        namedComponentModels.put(name, (ComponentModel) componentModel);
+      });
     });
 
-    executeOnEveryRootElement(componentModel -> {
-      if (componentModel.getNameAttribute() != null) {
-        namedTopLevelComponentModels.put(componentModel.getNameAttribute(), componentModel);
-      }
+    topLevelComponentsStream().forEach(componentModel -> {
+      componentModel.getComponentId().ifPresent(name -> {
+        namedTopLevelComponentModels.put(name, (ComponentModel) componentModel);
+      });
     });
   }
 
@@ -592,21 +589,22 @@ public class ApplicationModel implements ArtifactAst {
     // checkState(componentBuildingDefinitionRegistry.isPresent(),
     // "ApplicationModel was created without a " + ComponentBuildingDefinitionProvider.class.getName());
     componentBuildingDefinitionRegistry.ifPresent(buildingDefinitionRegistry -> {
-      executeOnEveryComponentTree(componentModel -> {
+      recursiveStream().forEach(componentModel -> {
         Optional<ComponentBuildingDefinition<?>> buildingDefinition =
             buildingDefinitionRegistry.getBuildingDefinition(componentModel.getIdentifier());
         buildingDefinition.map(definition -> {
-          ObjectTypeVisitor typeDefinitionVisitor = new ObjectTypeVisitor(componentModel);
+          ObjectTypeVisitor typeDefinitionVisitor = new ObjectTypeVisitor((ComponentModel) componentModel);
           definition.getTypeDefinition().visit(typeDefinitionVisitor);
           // We still have components without extension models
-          componentModel.setType(typeDefinitionVisitor.getType());
+          ((ComponentModel) componentModel).setType(typeDefinitionVisitor.getType());
 
           return definition;
         }).orElseGet(() -> {
-          String classParameter = componentModel.getRawParameters().get(CLASS_ATTRIBUTE);
+          String classParameter = ((ComponentModel) componentModel).getRawParameters().get(CLASS_ATTRIBUTE);
           if (classParameter != null) {
             try {
-              componentModel.setType(ClassUtils.loadClass(classParameter, currentThread().getContextClassLoader()));
+              ((ComponentModel) componentModel)
+                  .setType(ClassUtils.loadClass(classParameter, currentThread().getContextClassLoader()));
             } catch (ClassNotFoundException e) {
               throw new RuntimeConfigurationException(createStaticMessage(e.getMessage()), e);
             }
@@ -618,14 +616,14 @@ public class ApplicationModel implements ArtifactAst {
 
     // Use ExtensionModel to register top level and subTypes elements
     ReflectionCache reflectionCache = new ReflectionCache();
-    Map<ComponentIdentifier, MetadataTypeModelAdapter> registry = new HashMap();
+    Map<ComponentIdentifier, MetadataTypeModelAdapter> registry = new HashMap<>();
     extensionModelHelper.getExtensionsModels().stream().forEach(extensionModel -> extensionModel.getTypes().stream()
         .filter(p -> isInstantiable(p, reflectionCache))
         .forEach(parameterType -> registerTopLevelParameter(parameterType, reflectionCache, registry, extensionModel)));
 
-    executeOnEveryComponentTree(componentModel -> {
+    recursiveStream().forEach(componentModel -> {
       if (registry.containsKey(componentModel.getIdentifier())) {
-        componentModel.setMetadataTypeModelAdapter(registry.get(componentModel.getIdentifier()));
+        ((ComponentModel) componentModel).setMetadataTypeModelAdapter(registry.get(componentModel.getIdentifier()));
       }
     });
   }
@@ -710,18 +708,20 @@ public class ApplicationModel implements ArtifactAst {
    * Process from any message source the redelivery-policy to make it part of the final pipeline.
    */
   private void processSourcesRedeliveryPolicy() {
-    executeOnEveryFlow(flowComponentModel -> {
-      if (!flowComponentModel.getInnerComponents().isEmpty()) {
-        ComponentModel possibleSourceComponent = flowComponentModel.getInnerComponents().get(0);
-        possibleSourceComponent.getInnerComponents().stream()
-            .filter(childComponent -> childComponent.getIdentifier().equals(REDELIVERY_POLICY_IDENTIFIER))
-            .findAny()
-            .ifPresent(redeliveryPolicyComponentModel -> {
-              possibleSourceComponent.getInnerComponents().remove(redeliveryPolicyComponentModel);
-              flowComponentModel.getInnerComponents().add(1, redeliveryPolicyComponentModel);
-            });
-      }
-    });
+    topLevelComponentsStream()
+        .filter(cm -> FLOW_IDENTIFIER.equals(cm.getIdentifier()))
+        .forEach(flowComponentModel -> {
+          if (!((ComponentModel) flowComponentModel).getInnerComponents().isEmpty()) {
+            ComponentModel possibleSourceComponent = ((ComponentModel) flowComponentModel).getInnerComponents().get(0);
+            possibleSourceComponent.getInnerComponents().stream()
+                .filter(childComponent -> childComponent.getIdentifier().equals(REDELIVERY_POLICY_IDENTIFIER))
+                .findAny()
+                .ifPresent(redeliveryPolicyComponentModel -> {
+                  possibleSourceComponent.getInnerComponents().remove(redeliveryPolicyComponentModel);
+                  ((ComponentModel) flowComponentModel).getInnerComponents().add(1, redeliveryPolicyComponentModel);
+                });
+          }
+        });
   }
 
   private void convertArtifactDeclarationToComponentModel(Set<ExtensionModel> extensionModels,
@@ -832,7 +832,7 @@ public class ApplicationModel implements ArtifactAst {
 
   private void validateModel(Optional<ComponentBuildingDefinitionRegistry> componentBuildingDefinitionRegistry)
       throws ConfigurationException {
-    if (muleComponentModels.isEmpty() || !isMuleConfigurationFile()) {
+    if (muleComponentModels.isEmpty()) {
       return;
     }
     // TODO MULE-9692 all this validations will be moved to an entity that does the validation and allows to aggregate all
@@ -852,16 +852,17 @@ public class ApplicationModel implements ArtifactAst {
   }
 
   private void validateFlowRefPointsToExistingFlow() {
-    executeOnEveryMuleComponentTree(componentModel -> {
+    recursiveStream().forEach(componentModel -> {
       if (componentModel.getIdentifier().equals(FLOW_REF_IDENTIFIER)) {
-        String nameAttribute = componentModel.getNameAttribute();
+        String nameAttribute = componentModel.getComponentId().orElse(null);
         if (nameAttribute != null && !nameAttribute.startsWith(DEFAULT_EXPRESSION_PREFIX)) {
           Optional<ComponentModel> referencedFlow = findTopLevelNamedComponent(nameAttribute);
           referencedFlow
               .orElseThrow(() -> new MuleRuntimeException(createStaticMessage("flow-ref at %s:%s is pointing to %s which does not exist",
-                                                                              componentModel.getConfigFileName()
+                                                                              componentModel.getMetadata().getFileName()
                                                                                   .orElse("unknown"),
-                                                                              componentModel.getLineNumber().orElse(-1),
+                                                                              componentModel.getMetadata().getStartLine()
+                                                                                  .orElse(-1),
                                                                               nameAttribute)));
         }
       }
@@ -869,13 +870,14 @@ public class ApplicationModel implements ArtifactAst {
   }
 
   private void validateParameterAndChildForSameAttributeAreNotDefinedTogether() {
-    executeOnEveryMuleComponentTree(componentModel -> {
-      for (String parameterName : componentModel.getRawParameters().keySet()) {
-        if (!componentModel.isParameterValueProvidedBySchema(parameterName)) {
+    recursiveStream().forEach(componentModel -> {
+      for (String parameterName : ((ComponentModel) componentModel).getRawParameters().keySet()) {
+        if (!((ComponentModel) componentModel).isParameterValueProvidedBySchema(parameterName)) {
           String mapChildName = hyphenize(pluralize(parameterName));
           String listOrPojoChildName = hyphenize(parameterName);
           Optional<ComponentModel> childOptional =
-              findRelatedChildForParameter(componentModel.getInnerComponents(), mapChildName, listOrPojoChildName);
+              findRelatedChildForParameter(((ComponentModel) componentModel).getInnerComponents(), mapChildName,
+                                           listOrPojoChildName);
           if (childOptional.isPresent()) {
             throw new MuleRuntimeException(createStaticMessage(
                                                                format("Component %s has a child element %s which is used for the same purpose of the configuration parameter %s. "
@@ -899,25 +901,24 @@ public class ApplicationModel implements ArtifactAst {
   }
 
   private void validateSingletonsAreNotRepeated() {
-    Map<String, ComponentModel> existingObjectsWithName = new HashMap<>();
+    Map<String, ComponentAst> existingObjectsWithName = new HashMap<>();
     executeOnEveryRootElementWithBuildingDefinition(((componentModel, componentBuildingDefinition) -> {
       if (componentBuildingDefinition.getRegistrationName() != null) {
-        String nameAttributeValue = componentModel.getNameAttribute();
-
+        String nameAttributeValue = componentModel.getComponentId().orElse(null);
         if (existingObjectsWithName.containsKey(nameAttributeValue)) {
-          ComponentModel otherComponentModel = existingObjectsWithName.get(nameAttributeValue);
-          if (componentModel.getConfigFileName().isPresent() && componentModel.getLineNumber().isPresent() &&
-              otherComponentModel.getConfigFileName().isPresent() && otherComponentModel.getLineNumber().isPresent()) {
-            throw new MuleRuntimeException(createStaticMessage(
-                                                               "The configuration element [%s] can only appear once, but was present in both [%s:%d] and [%s:%d]",
+          ComponentAst otherComponentModel = existingObjectsWithName.get(nameAttributeValue);
+          if (componentModel.getMetadata().getFileName().isPresent()
+              && componentModel.getMetadata().getStartLine().isPresent()
+              && otherComponentModel.getMetadata().getFileName().isPresent()
+              && otherComponentModel.getMetadata().getStartLine().isPresent()) {
+            throw new MuleRuntimeException(createStaticMessage("The configuration element [%s] can only appear once, but was present in both [%s:%d] and [%s:%d]",
                                                                componentModel.getIdentifier(),
-                                                               otherComponentModel.getConfigFileName().get(),
-                                                               otherComponentModel.getLineNumber().get(),
-                                                               componentModel.getConfigFileName().get(),
-                                                               componentModel.getLineNumber().get()));
+                                                               otherComponentModel.getMetadata().getFileName().get(),
+                                                               otherComponentModel.getMetadata().getStartLine().getAsInt(),
+                                                               componentModel.getMetadata().getFileName().get(),
+                                                               componentModel.getMetadata().getStartLine().getAsInt()));
           } else {
-            throw new MuleRuntimeException(createStaticMessage(
-                                                               "The configuration element [%s] can only appear once, but was present multiple times",
+            throw new MuleRuntimeException(createStaticMessage("The configuration element [%s] can only appear once, but was present multiple times",
                                                                componentModel.getIdentifier()));
           }
         }
@@ -927,13 +928,12 @@ public class ApplicationModel implements ArtifactAst {
   }
 
   private void validateNameIsNotRepeated() {
-    Map<String, ComponentModel> existingObjectsWithName = new HashMap<>();
-    executeOnEveryRootElement(componentModel -> {
-      String nameAttributeValue = componentModel.getNameAttribute();
+    Map<String, ComponentAst> existingObjectsWithName = new HashMap<>();
+    topLevelComponentsStream().forEach(componentModel -> {
+      String nameAttributeValue = componentModel.getComponentId().orElse(null);
       if (nameAttributeValue != null && !ignoredNameValidationComponentList.contains(componentModel.getIdentifier())) {
         if (existingObjectsWithName.containsKey(nameAttributeValue)) {
-          throw new MuleRuntimeException(createStaticMessage(
-                                                             "Two configuration elements have been defined with the same global name. Global name [%s] must be unique. Clashing components are %s and %s",
+          throw new MuleRuntimeException(createStaticMessage("Two configuration elements have been defined with the same global name. Global name [%s] must be unique. Clashing components are %s and %s",
                                                              nameAttributeValue,
                                                              existingObjectsWithName.get(nameAttributeValue).getIdentifier(),
                                                              componentModel.getIdentifier()));
@@ -944,34 +944,28 @@ public class ApplicationModel implements ArtifactAst {
   }
 
   private void validateNameHasValidCharacters() {
-    executeOnEveryRootElement(componentModel -> {
-      String nameAttributeValue = componentModel.getNameAttribute();
+    topLevelComponentsStream().forEach(componentModel -> {
+      String nameAttributeValue = componentModel.getComponentId().orElse(null);
       if (nameAttributeValue != null) {
         try {
           verifyStringDoesNotContainsReservedCharacters(nameAttributeValue);
         } catch (IllegalArgumentException e) {
-          throw new MuleRuntimeException(createStaticMessage(
-                                                             format("Invalid global element name '%s' in %s:%s. Problem is: %s",
+          throw new MuleRuntimeException(createStaticMessage(format("Invalid global element name '%s' in %s:%s. Problem is: %s",
                                                                     nameAttributeValue,
-                                                                    componentModel.getConfigFileName().orElse("unknown"),
-                                                                    componentModel.getLineNumber().orElse(-1),
+                                                                    componentModel.getMetadata().getFileName().orElse("unknown"),
+                                                                    componentModel.getMetadata().getStartLine().orElse(-1),
                                                                     e.getMessage())));
         }
       }
     });
   }
 
-  private boolean isMuleConfigurationFile() {
-    final ComponentIdentifier rootIdentifier = muleComponentModels.get(0).getIdentifier();
-    return rootIdentifier.equals(MULE_IDENTIFIER)
-        || rootIdentifier.equals(MULE_DOMAIN_IDENTIFIER)
-        || rootIdentifier.equals(MULE_EE_DOMAIN_IDENTIFIER);
-  }
-
   private void validateErrorMappings() {
-    executeOnEveryComponentTree(componentModel -> {
-      List<ComponentModel> errorMappings = componentModel.getInnerComponents().stream()
-          .filter(c -> c.getIdentifier().equals(ERROR_MAPPING_IDENTIFIER)).collect(toList());
+    recursiveStream().forEach(componentModel -> {
+      List<ComponentModel> errorMappings = componentModel.directChildrenStream()
+          .filter(c -> c.getIdentifier().equals(ERROR_MAPPING_IDENTIFIER))
+          .map(cm -> (ComponentModel) cm)
+          .collect(toList());
       if (!errorMappings.isEmpty()) {
         List<ComponentModel> anyMappings = errorMappings.stream().filter(this::isErrorMappingWithSourceAny).collect(toList());
         if (anyMappings.size() > 1) {
@@ -995,11 +989,11 @@ public class ApplicationModel implements ArtifactAst {
   }
 
   private void validateErrorHandlerStructure() {
-    executeOnEveryMuleComponentTree(component -> {
+    recursiveStream().forEach(component -> {
       if (component.getIdentifier().equals(ERROR_HANDLER_IDENTIFIER)) {
-        validateRefOrOnErrorsExclusiveness(component);
-        validateOnErrorsHaveTypeOrWhenAttribute(component);
-        validateNoMoreThanOneOnErrorPropagateWithRedelivery(component);
+        validateRefOrOnErrorsExclusiveness((ComponentModel) component);
+        validateOnErrorsHaveTypeOrWhenAttribute((ComponentModel) component);
+        validateNoMoreThanOneOnErrorPropagateWithRedelivery((ComponentModel) component);
       }
     });
   }
@@ -1013,8 +1007,7 @@ public class ApplicationModel implements ArtifactAst {
   private void validateNoMoreThanOneOnErrorPropagateWithRedelivery(ComponentModel component) {
     if (component.getInnerComponents().stream().filter(exceptionStrategyComponent -> exceptionStrategyComponent.getRawParameters()
         .get(MAX_REDELIVERY_ATTEMPTS_ROLLBACK_ES_ATTRIBUTE) != null).count() > 1) {
-      throw new MuleRuntimeException(createStaticMessage(
-                                                         "Only one on-error-propagate within a error-handler can handle message redelivery. Remove one of the maxRedeliveryAttempts attributes"));
+      throw new MuleRuntimeException(createStaticMessage("Only one on-error-propagate within a error-handler can handle message redelivery. Remove one of the maxRedeliveryAttempts attributes"));
     }
   }
 
@@ -1042,11 +1035,11 @@ public class ApplicationModel implements ArtifactAst {
   }
 
   private void validateExceptionStrategyWhenAttributeIsOnlyPresentInsideChoice() {
-    executeOnEveryMuleComponentTree(component -> {
+    recursiveStream().forEach(component -> {
       if (component.getIdentifier().getName().endsWith(EXCEPTION_STRATEGY_REFERENCE_ELEMENT)) {
-        if (component.getRawParameters().get(WHEN_CHOICE_ES_ATTRIBUTE) != null
-            && !component.getParent().getIdentifier().getName().equals(ERROR_HANDLER)
-            && !component.getParent().getIdentifier().getName().equals(MULE_ROOT_ELEMENT)) {
+        if (((ComponentModel) component).getRawParameters().get(WHEN_CHOICE_ES_ATTRIBUTE) != null
+            && !((ComponentModel) component).getParent().getIdentifier().getName().equals(ERROR_HANDLER)
+            && !((ComponentModel) component).getParent().getIdentifier().getName().equals(MULE_ROOT_ELEMENT)) {
           throw new MuleRuntimeException(
                                          createStaticMessage("Only handlers within an error-handler can have when attribute specified"));
         }
@@ -1057,12 +1050,11 @@ public class ApplicationModel implements ArtifactAst {
   private void validateNamedTopLevelElementsHaveName(ComponentBuildingDefinitionRegistry componentBuildingDefinitionRegistry)
       throws ConfigurationException {
     try {
-      List<ComponentModel> topLevelComponents = muleComponentModels.get(0).getInnerComponents();
-      topLevelComponents.stream().forEach(topLevelComponent -> {
+      topLevelComponentsStream().forEach(topLevelComponent -> {
         final ComponentIdentifier identifier = topLevelComponent.getIdentifier();
         componentBuildingDefinitionRegistry.getBuildingDefinition(identifier).filter(ComponentBuildingDefinition::isNamed)
             .ifPresent(buildingDefinition -> {
-              if (isBlank(topLevelComponent.getNameAttribute())) {
+              if (!topLevelComponent.getComponentId().isPresent()) {
                 throw new MuleRuntimeException(createStaticMessage(format("Global element %s:%s does not provide a name attribute.",
                                                                           identifier.getNamespace(), identifier.getName())));
               }
@@ -1073,49 +1065,6 @@ public class ApplicationModel implements ArtifactAst {
     }
   }
 
-  public void executeOnEveryComponentTree(final Consumer<ComponentModel> task) {
-    for (ComponentModel componentModel : muleComponentModels) {
-      executeOnComponentTree(componentModel, task);
-    }
-  }
-
-  public void executeOnEveryMuleComponentTree(final Consumer<ComponentModel> task) {
-    for (ComponentModel componentModel : muleComponentModels) {
-      executeOnComponentTree(componentModel, task);
-    }
-  }
-
-  public void executeOnlyOnMuleRoot(final Consumer<ComponentModel> task) {
-    for (ComponentModel componentModel : muleComponentModels) {
-      task.accept(componentModel);
-    }
-  }
-
-
-  public void executeOnEveryRootElement(final Consumer<ComponentModel> task) {
-    for (ComponentModel muleComponentModel : muleComponentModels) {
-      for (ComponentModel componentModel : muleComponentModel.getInnerComponents()) {
-        task.accept(componentModel);
-      }
-    }
-  }
-
-  public void executeOnEveryFlow(final Consumer<ComponentModel> task) {
-    executeOnEveryRootElement(componentModel -> {
-      if (FLOW_IDENTIFIER.equals(componentModel.getIdentifier())) {
-        task.accept(componentModel);
-      }
-    });
-  }
-
-  private void executeOnComponentTree(final ComponentModel component, final Consumer<ComponentModel> task)
-      throws MuleRuntimeException {
-    task.accept(component);
-    component.getInnerComponents().forEach((innerComponent) -> {
-      executeOnComponentTree(innerComponent, task);
-    });
-  }
-
   private void validateSingleElementsExistence() {
     validateSingleElementExistence(MUNIT_AFTER_SUITE_IDENTIFIER);
     validateSingleElementExistence(MUNIT_AFTER_SUITE_IDENTIFIER);
@@ -1124,10 +1073,10 @@ public class ApplicationModel implements ArtifactAst {
   }
 
   private void validateSingleElementExistence(ComponentIdentifier componentIdentifier) {
-    Map<String, Map<ComponentIdentifier, ComponentModel>> existingComponentsPerFile = new HashMap<>();
+    Map<String, Map<ComponentIdentifier, ComponentAst>> existingComponentsPerFile = new HashMap<>();
 
-    executeOnEveryMuleComponentTree(componentModel -> componentModel
-        .getConfigFileName().ifPresent(configFileName -> {
+    recursiveStream().forEach(componentModel -> componentModel.getMetadata().getFileName()
+        .ifPresent(configFileName -> {
           ComponentIdentifier identifier = componentModel.getIdentifier();
 
           if (componentIdentifier.getNamespace().equals(identifier.getNamespace())
@@ -1139,25 +1088,25 @@ public class ApplicationModel implements ArtifactAst {
                                                                  "Two configuration elements %s have been defined. Element [%s] must be unique. Clashing components are %s and %s",
                                                                  identifier.getNamespace() + ":" + identifier.getName(),
                                                                  identifier.getNamespace() + ":" + identifier.getName(),
-                                                                 componentModel.getNameAttribute(),
+                                                                 componentModel.getComponentId().orElse(null),
                                                                  existingComponentsPerFile.get(configFileName).get(identifier)
-                                                                     .getNameAttribute()));
+                                                                     .getComponentId().orElse(null)));
             }
-            Map<ComponentIdentifier, ComponentModel> existingComponentWithName = new HashMap<>();
+            Map<ComponentIdentifier, ComponentAst> existingComponentWithName = new HashMap<>();
             existingComponentWithName.put(identifier, componentModel);
             existingComponentsPerFile.put(configFileName, existingComponentWithName);
           }
         }));
   }
 
-  /**
-   * TODO MULE-9688: When the model it's made immutable we will also provide the parent component for navigation and this will not
-   * be needed anymore.
-   *
-   * @return the root component model
-   */
-  public ComponentModel getRootComponentModel() {
-    return muleComponentModels.get(0);
+  public void addMacroExpandedRoot(ComponentModel root) {
+    final ComponentModel rootComponentModel = muleComponentModels.get(0);
+    root.getInnerComponents().forEach(ige -> {
+      ige.setRoot(true);
+      ige.setParent(rootComponentModel);
+    });
+
+    rootComponentModel.getInnerComponents().add(root);
   }
 
   /**
@@ -1190,8 +1139,8 @@ public class ApplicationModel implements ArtifactAst {
    * message processors
    *
    * @param extensionModels Set of {@link ExtensionModel extensionModels} that will be used to check if the element has to be
-   *                        expanded.
-   * @param postProcess     a closure to be executed after the macroexpansion of an extension.
+   *        expanded.
+   * @param postProcess a closure to be executed after the macroexpansion of an extension.
    */
   private void expandModules(Set<ExtensionModel> extensionModels, Runnable postProcess) {
     new MacroExpansionModulesModel(this, extensionModels).expand(postProcess);
@@ -1204,16 +1153,14 @@ public class ApplicationModel implements ArtifactAst {
     return configurationProperties;
   }
 
-  private void executeOnEveryRootElementWithBuildingDefinition(BiConsumer<ComponentModel, ComponentBuildingDefinition> action) {
+  private void executeOnEveryRootElementWithBuildingDefinition(BiConsumer<ComponentAst, ComponentBuildingDefinition<?>> action) {
     if (componentBuildingDefinitionRegistry.isPresent()) {
       ComponentBuildingDefinitionRegistry definitionRegistry = componentBuildingDefinitionRegistry.get();
 
-      this.executeOnEveryRootElement(componentModel -> {
+      topLevelComponentsStream().forEach(componentModel -> {
         Optional<ComponentBuildingDefinition<?>> buildingDefinition =
             definitionRegistry.getBuildingDefinition(componentModel.getIdentifier());
-        buildingDefinition.ifPresent(componentBuildingDefinition -> {
-          action.accept(componentModel, componentBuildingDefinition);
-        });
+        buildingDefinition.ifPresent(componentBuildingDefinition -> action.accept(componentModel, componentBuildingDefinition));
       });
     }
   }
@@ -1227,10 +1174,11 @@ public class ApplicationModel implements ArtifactAst {
   public Stream<Pair<ComponentAst, List<ComponentAst>>> recursiveStreamWithHierarchy() {
     final List<Pair<ComponentAst, List<ComponentAst>>> ret = new ArrayList<>();
 
-    muleComponentModels.forEach(cm -> {
+    topLevelComponentsStream().forEach(cm -> {
       final List<ComponentAst> currentContext = new ArrayList<>();
+      currentContext.add(cm);
 
-      ret.add(new Pair<>((ComponentAst) cm, new ArrayList<>(currentContext)));
+      ret.add(new Pair<>(cm, new ArrayList<>(currentContext)));
 
       recursiveStreamWithHierarchy(ret, cm, currentContext);
     });
@@ -1238,15 +1186,15 @@ public class ApplicationModel implements ArtifactAst {
     return ret.stream();
   }
 
-  private void recursiveStreamWithHierarchy(final List<Pair<ComponentAst, List<ComponentAst>>> ret, ComponentModel cm,
+  private void recursiveStreamWithHierarchy(final List<Pair<ComponentAst, List<ComponentAst>>> ret, ComponentAst cm,
                                             final List<ComponentAst> currentContext) {
-    ((ComponentAst) cm).directChildrenStream().forEach(cmi -> {
+    cm.directChildrenStream().forEach(cmi -> {
       final List<ComponentAst> currentContextI = new ArrayList<>(currentContext);
 
       ret.add(new Pair<>(cmi, new ArrayList<>(currentContextI)));
 
       currentContextI.add(cmi);
-      recursiveStreamWithHierarchy(ret, (ComponentModel) cmi, currentContextI);
+      recursiveStreamWithHierarchy(ret, cmi, currentContextI);
     });
   }
 
